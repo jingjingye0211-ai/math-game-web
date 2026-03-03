@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Math Learning Game</title>
+    <!-- 引入PyScript核心库 -->
+    <link rel="stylesheet" href="https://pyscript.net/latest/pyscript.css" />
+    <script defer src="https://pyscript.net/latest/pyscript.js"></script>
+    <!-- 引入OpenCV（浏览器版） -->
+    <script src="https://docs.opencv.org/4.x/opencv.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #video { border: 2px solid #333; border-radius: 8px; }
+        .controls { margin-top: 20px; }
+        button { padding: 10px 20px; margin: 0 5px; font-size: 16px; }
+        #feedback { font-size: 24px; font-weight: bold; margin-top: 10px; }
+        #stats { margin-top: 10px; font-size: 18px; }
+    </style>
+</head>
+<body>
+    <h1>AI Math Learning Game (Gesture Recognition)</h1>
+    <!-- 摄像头画面容器 -->
+    <video id="video" width="640" height="480" autoplay playsinline></video>
+    <!-- 难度控制按钮 -->
+    <div class="controls">
+        <button id="btn10">Difficulty: 10</button>
+        <button id="btn20">Difficulty: 20</button>
+        <button id="btn100">Difficulty: 100</button>
+    </div>
+    <!-- 反馈与统计 -->
+    <div id="feedback">Ready to start!</div>
+    <div id="stats">Correct: 0 | Wrong: 0 | Stars: 0</div>
+
+    <!-- PyScript核心代码 -->
+    <py-script>
+        import cv2
+        import random
+        import time
+        from pyodide import create_proxy
+        from js import document, navigator, ImageData, Uint8ClampedArray
+
+        # ===================== 全局变量 =====================
+        current_difficulty = 20
+        question, answer = "", 0
+        correct_num, wrong_num, star_count = 0, 0, 0
+        star_threshold = 5
+        last_correct_time = 0
+        cooldown = 1.5
+        video = document.getElementById("video")
+        feedback_elem = document.getElementById("feedback")
+        stats_elem = document.getElementById("stats")
+
+        # ===================== 简化版手势识别（OpenCV） =====================
+        def count_fingers(frame):
+            # 转为灰度图 + 二值化（简化版，核心是计数轮廓）
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5,5), 0)
+            _, thresh = cv2.threshold(blur, 70, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+            contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # 过滤小轮廓，计数手指
+            finger_count = 0
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if 300 < area < 3000:  # 过滤背景噪点
+                    finger_count += 1
+            return min(finger_count, 10)  # 限制最大计数为10
+
+        # ===================== 生成题目 =====================
+        def generate_question(difficulty=20):
+            while True:
+                a = random.randint(0, difficulty)
+                b = random.randint(0, difficulty)
+                if a < b:
+                    a, b = b, a
+                op = random.choice(['+', '-'])
+                ans = a + b if op == '+' else a - b
+                if ans % 10 != 0 and ans >= 0 and ans <= difficulty:
+                    break
+            return f'{a} {op} {b} = ?', ans
+
+        # ===================== 答题判断 =====================
+        def check_answer(user_input):
+            global correct_num, wrong_num, star_count, last_correct_time
+            current_time = time.time()
+            if current_time - last_correct_time < cooldown:
+                return
+            
+            if user_input == answer:
+                feedback_elem.innerText = "CORRECT! ⭐"
+                feedback_elem.style.color = "green"
+                correct_num += 1
+                last_correct_time = current_time
+                # 星星奖励
+                if correct_num % star_threshold == 0:
+                    star_count += 1
+                    feedback_elem.innerText = f"CORRECT! Stars: {star_count}"
+            else:
+                feedback_elem.innerText = f"WRONG! Answer is {answer}"
+                feedback_elem.style.color = "red"
+                wrong_num += 1
+            # 更新统计
+            stats_elem.innerText = f"Correct: {correct_num} | Wrong: {wrong_num} | Stars: {star_count}"
+            # 生成新题目
+            global question, answer
+            question, answer = generate_question(current_difficulty)
+            feedback_elem.innerText += f" | Next: {question}"
+
+        # ===================== 难度切换 =====================
+        def set_difficulty10(event):
+            global current_difficulty, question, answer
+            current_difficulty = 10
+            question, answer = generate_question(10)
+            feedback_elem.innerText = f"Difficulty: 10 | Next: {question}"
+
+        def set_difficulty20(event):
+            global current_difficulty, question, answer
+            current_difficulty = 20
+            question, answer = generate_question(20)
+            feedback_elem.innerText = f"Difficulty: 20 | Next: {question}"
+
+        def set_difficulty100(event):
+            global current_difficulty, question, answer
+            current_difficulty = 100
+            question, answer = generate_question(100)
+            feedback_elem.innerText = f"Difficulty: 100 | Next: {question}"
+
+        # ===================== 摄像头实时处理 =====================
+        def process_video():
+            # 获取摄像头帧
+            cap = cv2.VideoCapture(0)
+            ret, frame = cap.read()
+            if not ret:
+                return
+            
+            # 镜像翻转 + 手势计数
+            frame = cv2.flip(frame, 1)
+            finger_count = count_fingers(frame)
+            
+            # 显示手指计数（叠加到画面）
+            cv2.putText(frame, f"Fingers: {finger_count}", (20, 50), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.putText(frame, question, (20, 100), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+            
+            # 转换为浏览器可显示的格式
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_frame.shape
+            bytes_per_line = ch * w
+            # 更新video元素
+            img_data = ImageData(Uint8ClampedArray(rgb_frame.tobytes()), w, h)
+            video.getContext('2d').putImageData(img_data, 0, 0)
+            
+            # 答题判断（稳定计数后提交）
+            if finger_count > 0:
+                check_answer(finger_count)
+            
+            # 循环调用
+            setTimeout(create_proxy(process_video), 30)
+
+        # ===================== 初始化 =====================
+        def init():
+            # 绑定难度按钮事件
+            document.getElementById("btn10").addEventListener("click", create_proxy(set_difficulty10))
+            document.getElementById("btn20").addEventListener("click", create_proxy(set_difficulty20))
+            document.getElementById("btn100").addEventListener("click", create_proxy(set_difficulty100))
+            # 初始化题目
+            global question, answer
+            question, answer = generate_question(current_difficulty)
+            feedback_elem.innerText = f"Ready! First question: {question}"
+            # 启动摄像头
+            navigator.mediaDevices.getUserMedia({"video": True}).then(lambda stream: video.srcObject = stream)
+            # 启动视频处理
+            process_video()
+
+        # 页面加载后初始化
+        init()
+    </py-script>
+</body>
+</html>
