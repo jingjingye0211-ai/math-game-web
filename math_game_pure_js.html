@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Math Learning Game (Pure JS Version)</title>
+    <!-- 引入OpenCV.js -->
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="opencvReady()"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: Arial, sans-serif; }
+        body { padding: 20px; background-color: #f5f5f5; }
+        h1 { color: #333; margin-bottom: 20px; }
+        .container { display: flex; flex-direction: column; gap: 15px; }
+        #video-container { position: relative; width: 640px; height: 480px; border: 3px solid #6a0dad; border-radius: 10px; overflow: hidden; }
+        #video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; padding: 20px; color: white; text-shadow: 2px 2px 4px #000; }
+        .controls { display: flex; gap: 10px; margin-top: 10px; }
+        .diff-btn { padding: 12px 24px; border: none; border-radius: 8px; background-color: #6a0dad; color: white; font-size: 16px; cursor: pointer; transition: 0.3s; }
+        .diff-btn:hover { background-color: #8b2be2; }
+        #feedback { font-size: 24px; font-weight: bold; margin-top: 10px; height: 30px; }
+        #stats { font-size: 18px; color: #555; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <h1>AI Math Learning Game (Gesture Recognition)</h1>
+    <div class="container">
+        <div id="video-container">
+            <video id="video" autoplay playsinline></video>
+            <div id="overlay">
+                <div id="question" style="font-size: 28px; margin-bottom: 10px;"></div>
+                <div id="finger-count" style="font-size: 24px;">Fingers: 0</div>
+            </div>
+        </div>
+        <div class="controls">
+            <button class="diff-btn" id="btn10">Difficulty: 10</button>
+            <button class="diff-btn" id="btn20">Difficulty: 20</button>
+            <button class="diff-btn" id="btn100">Difficulty: 100</button>
+        </div>
+        <div id="feedback" style="color: #333;">Ready to start!</div>
+        <div id="stats">Correct: 0 | Wrong: 0 | Stars: 0</div>
+    </div>
+
+    <script>
+        let cv; // OpenCV对象
+        let currentDifficulty = 20;
+        let question = "";
+        let answer = 0;
+        let correctNum = 0;
+        let wrongNum = 0;
+        let starCount = 0;
+        const starThreshold = 5;
+        let lastCorrectTime = 0;
+        const cooldown = 1.5;
+        let cap = null;
+        const video = document.getElementById('video');
+        const questionElem = document.getElementById('question');
+        const fingerCountElem = document.getElementById('finger-count');
+        const feedbackElem = document.getElementById('feedback');
+        const statsElem = document.getElementById('stats');
+
+        // OpenCV加载完成
+        function opencvReady() {
+            cv = window.cv;
+            initGame();
+        }
+
+        // 生成题目
+        function generateQuestion(difficulty) {
+            while (true) {
+                let a = Math.floor(Math.random() * (difficulty + 1));
+                let b = Math.floor(Math.random() * (difficulty + 1));
+                if (a < b) [a, b] = [b, a];
+                const op = Math.random() > 0.5 ? '+' : '-';
+                const ans = op === '+' ? a + b : a - b;
+                if (ans % 10 !== 0 && ans >= 0 && ans <= difficulty) {
+                    return [`${a} ${op} ${b} = ?`, ans];
+                }
+            }
+        }
+
+        // 手势计数
+        function countFingers(frame) {
+            if (!cv) return 0;
+            const src = cv.imread('video');
+            const gray = new cv.Mat();
+            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+            const blur = new cv.Mat();
+            cv.GaussianBlur(gray, blur, new cv.Size(7, 7), 0);
+            const thresh = new cv.Mat();
+            cv.adaptiveThreshold(blur, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 15, 2);
+            const contours = new cv.MatVector();
+            const hierarchy = new cv.Mat();
+            cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            if (contours.size() === 0) return 0;
+            let maxContour = contours.get(0);
+            for (let i = 1; i < contours.size(); i++) {
+                const cnt = contours.get(i);
+                if (cv.contourArea(cnt) > cv.contourArea(maxContour)) {
+                    maxContour = cnt;
+                }
+            }
+            if (cv.contourArea(maxContour) < 5000) return 0;
+            const hull = new cv.Mat();
+            cv.convexHull(maxContour, hull, false, false);
+            const defects = new cv.Mat();
+            cv.convexityDefects(maxContour, hull, defects);
+            let fingerCount = 0;
+            if (defects.rows > 0) {
+                for (let i = 0; i < defects.rows; i++) {
+                    const d = defects.intPtr(i, 0)[3];
+                    if (d > 1000) fingerCount++;
+                }
+            }
+            src.delete(); gray.delete(); blur.delete(); thresh.delete(); contours.delete(); hierarchy.delete(); maxContour.delete(); hull.delete(); defects.delete();
+            return Math.min(fingerCount + 1, 10);
+        }
+
+        // 答题判断
+        function checkAnswer(userInput) {
+            const now = Date.now() / 1000;
+            if (now - lastCorrectTime < cooldown) return;
+            if (userInput === answer) {
+                feedbackElem.textContent = "CORRECT! ✅";
+                feedbackElem.style.color = "#28a745";
+                correctNum++;
+                lastCorrectTime = now;
+                if (correctNum % starThreshold === 0) {
+                    starCount++;
+                    feedbackElem.textContent = `CORRECT! ⭐ Stars: ${starCount}`;
+                }
+                const newQ = generateQuestion(currentDifficulty);
+                question = newQ[0];
+                answer = newQ[1];
+                questionElem.textContent = question;
+            } else {
+                feedbackElem.textContent = `WRONG! Answer is ${answer}`;
+                feedbackElem.style.color = "#dc3545";
+                wrongNum++;
+            }
+            statsElem.textContent = `Correct: ${correctNum} | Wrong: ${wrongNum} | Stars: ${starCount}`;
+        }
+
+        // 难度切换
+        function setDifficulty(diff) {
+            currentDifficulty = diff;
+            const newQ = generateQuestion(diff);
+            question = newQ[0];
+            answer = newQ[1];
+            questionElem.textContent = question;
+            feedbackElem.textContent = `Difficulty set to ${diff}!`;
+            feedbackElem.style.color = "#6a0dad";
+        }
+
+        // 实时处理
+        function processFrame() {
+            if (!cv || !cap) return;
+            const frame = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+            cap.read(frame);
+            const fingerCount = countFingers(frame);
+            fingerCountElem.textContent = `Fingers: ${fingerCount}`;
+            if (fingerCount > 0) checkAnswer(fingerCount);
+            frame.delete();
+            requestAnimationFrame(processFrame);
+        }
+
+        // 初始化游戏
+        function initGame() {
+            const initQ = generateQuestion(currentDifficulty);
+            question = initQ[0];
+            answer = initQ[1];
+            questionElem.textContent = question;
+
+            document.getElementById('btn10').addEventListener('click', () => setDifficulty(10));
+            document.getElementById('btn20').addEventListener('click', () => setDifficulty(20));
+            document.getElementById('btn100').addEventListener('click', () => setDifficulty(100));
+
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => {
+                    video.srcObject = stream;
+                    cap = new cv.VideoCapture(video);
+                    processFrame();
+                })
+                .catch(err => {
+                    feedbackElem.textContent = `Camera error: ${err.message}`;
+                    feedbackElem.style.color = "#dc3545";
+                });
+        }
+    </script>
+</body>
+</html>
