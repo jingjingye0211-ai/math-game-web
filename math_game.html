@@ -2,71 +2,88 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AI Math Learning Game</title>
-    <!-- 引入PyScript核心库 -->
-    <link rel="stylesheet" href="https://pyscript.net/latest/pyscript.css" />
-    <script defer src="https://pyscript.net/latest/pyscript.js"></script>
-    <!-- 引入OpenCV（浏览器版） -->
-    <script src="https://docs.opencv.org/4.x/opencv.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Math Learning Game (Web Version)</title>
+    <!-- 引入PyScript核心库（固定版本，避免兼容性问题） -->
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/pyscript.css" />
+    <script defer src="https://pyscript.net/releases/2024.1.1/pyscript.js"></script>
+    <!-- 引入OpenCV.js（浏览器端OpenCV，固定版本） -->
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="opencvReady()"></script>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        #video { border: 2px solid #333; border-radius: 8px; }
-        .controls { margin-top: 20px; }
-        button { padding: 10px 20px; margin: 0 5px; font-size: 16px; }
-        #feedback { font-size: 24px; font-weight: bold; margin-top: 10px; }
-        #stats { margin-top: 10px; font-size: 18px; }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: Arial, sans-serif; }
+        body { padding: 20px; background-color: #f5f5f5; }
+        h1 { color: #333; margin-bottom: 20px; }
+        .container { display: flex; flex-direction: column; gap: 15px; }
+        #video-container { position: relative; width: 640px; height: 480px; border: 3px solid #6a0dad; border-radius: 10px; overflow: hidden; }
+        #video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); /* 镜像翻转，符合直觉 */ }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; padding: 20px; color: white; text-shadow: 2px 2px 4px #000; }
+        .controls { display: flex; gap: 10px; margin-top: 10px; }
+        .diff-btn { padding: 12px 24px; border: none; border-radius: 8px; background-color: #6a0dad; color: white; font-size: 16px; cursor: pointer; transition: 0.3s; }
+        .diff-btn:hover { background-color: #8b2be2; }
+        #feedback { font-size: 24px; font-weight: bold; margin-top: 10px; height: 30px; }
+        #stats { font-size: 18px; color: #555; margin-top: 5px; }
     </style>
 </head>
 <body>
     <h1>AI Math Learning Game (Gesture Recognition)</h1>
-    <!-- 摄像头画面容器 -->
-    <video id="video" width="640" height="480" autoplay playsinline></video>
-    <!-- 难度控制按钮 -->
-    <div class="controls">
-        <button id="btn10">Difficulty: 10</button>
-        <button id="btn20">Difficulty: 20</button>
-        <button id="btn100">Difficulty: 100</button>
+    <div class="container">
+        <div id="video-container">
+            <video id="video" autoplay playsinline></video>
+            <!-- 叠加层：显示题目、手指数 -->
+            <div id="overlay">
+                <div id="question" style="font-size: 28px; margin-bottom: 10px;"></div>
+                <div id="finger-count" style="font-size: 24px;">Fingers: 0</div>
+            </div>
+        </div>
+        <div class="controls">
+            <button class="diff-btn" id="btn10">Difficulty: 10</button>
+            <button class="diff-btn" id="btn20">Difficulty: 20</button>
+            <button class="diff-btn" id="btn100">Difficulty: 100</button>
+        </div>
+        <div id="feedback" style="color: #333;">Ready to start!</div>
+        <div id="stats">Correct: 0 | Wrong: 0 | Stars: 0</div>
     </div>
-    <!-- 反馈与统计 -->
-    <div id="feedback">Ready to start!</div>
-    <div id="stats">Correct: 0 | Wrong: 0 | Stars: 0</div>
 
-    <!-- PyScript核心代码 -->
+    <!-- PyScript核心代码：用py-config指定依赖，避免代码暴露 -->
+    <py-config>
+        packages = ["opencv-python", "numpy"]
+    </py-config>
+
     <py-script>
         import cv2
+        import numpy as np
         import random
         import time
         from pyodide import create_proxy
-        from js import document, navigator, ImageData, Uint8ClampedArray
+        from js import document, navigator, console
+        from pyodide.ffi import to_js
 
-        # ===================== 全局变量 =====================
+        # ===================== 全局变量（修复作用域问题） =====================
         current_difficulty = 20
-        question, answer = "", 0
-        correct_num, wrong_num, star_count = 0, 0, 0
+        question = ""
+        answer = 0
+        correct_num = 0
+        wrong_num = 0
+        star_count = 0
         star_threshold = 5
         last_correct_time = 0
-        cooldown = 1.5
-        video = document.getElementById("video")
+        cooldown = 1.5  # 答题冷却时间
+        opencv_loaded = False
+        cap = None
+        video_elem = document.getElementById("video")
+        question_elem = document.getElementById("question")
+        finger_count_elem = document.getElementById("finger-count")
         feedback_elem = document.getElementById("feedback")
         stats_elem = document.getElementById("stats")
 
-        # ===================== 简化版手势识别（OpenCV） =====================
-        def count_fingers(frame):
-            # 转为灰度图 + 二值化（简化版，核心是计数轮廓）
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5,5), 0)
-            _, thresh = cv2.threshold(blur, 70, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-            contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # 过滤小轮廓，计数手指
-            finger_count = 0
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if 300 < area < 3000:  # 过滤背景噪点
-                    finger_count += 1
-            return min(finger_count, 10)  # 限制最大计数为10
+        # ===================== 1. OpenCV加载完成回调 =====================
+        def opencvReady():
+            global opencv_loaded
+            opencv_loaded = True
+            console.log("OpenCV loaded successfully!")
+            init_game()
 
-        # ===================== 生成题目 =====================
+        # ===================== 2. 生成题目（保留原逻辑：排除整十数） =====================
         def generate_question(difficulty=20):
             while True:
                 a = random.randint(0, difficulty)
@@ -75,106 +92,143 @@
                     a, b = b, a
                 op = random.choice(['+', '-'])
                 ans = a + b if op == '+' else a - b
+                # 排除整十数，且答案非负、不超过难度
                 if ans % 10 != 0 and ans >= 0 and ans <= difficulty:
                     break
-            return f'{a} {op} {b} = ?', ans
+            return f"{a} {op} {b} = ?", ans
 
-        # ===================== 答题判断 =====================
+        # ===================== 3. 优化版手势计数（OpenCV核心，适配网页） =====================
+        def count_fingers(frame):
+            if not opencv_loaded:
+                return 0
+            # 1. 转为灰度图 + 降噪
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (7, 7), 0)
+            # 2. 肤色检测（提升抗干扰性，适配手部识别）
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+            upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower_skin, upper_skin)
+            # 3. 结合灰度图与肤色掩码，分割手部区域
+            masked_gray = cv2.bitwise_and(gray, gray, mask=mask)
+            # 4. 二值化（自适应阈值，适配不同光线）
+            thresh = cv2.adaptiveThreshold(masked_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                           cv2.THRESH_BINARY_INV, 15, 2)
+            # 5. 轮廓检测（只找最大的轮廓，即手部）
+            contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                return 0
+            max_contour = max(contours, key=cv2.contourArea)
+            # 过滤过小的轮廓（排除背景噪点）
+            if cv2.contourArea(max_contour) < 5000:
+                return 0
+            # 6. 凸包检测（核心：识别手指尖）
+            hull = cv2.convexHull(max_contour, returnPoints=False)
+            defects = cv2.convexityDefects(max_contour, hull)
+            finger_count = 0
+            # 7. 遍历凸包缺陷，计数手指
+            if defects is not None:
+                for i in range(defects.shape[0]):
+                    s, e, f, d = defects[i, 0]
+                    start = tuple(max_contour[s][0])
+                    end = tuple(max_contour[e][0])
+                    far = tuple(max_contour[f][0])
+                    # 计算角度（过滤误判）
+                    a = np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
+                    b = np.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)
+                    c = np.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)
+                    angle = np.arccos((b**2 + c**2 - a**2) / (2 * b * c)) * 180 / np.pi
+                    # 角度小于90度，判定为手指
+                    if angle < 90 and d > 1000:
+                        finger_count += 1
+            # 手指数量 = 缺陷数 + 1（拇指），限制最大为10
+            return min(finger_count + 1, 10)
+
+        # ===================== 4. 答题判断（修复冷却逻辑） =====================
         def check_answer(user_input):
-            global correct_num, wrong_num, star_count, last_correct_time
+            global correct_num, wrong_num, star_count, last_correct_time, question, answer
             current_time = time.time()
+            # 冷却期内不处理
             if current_time - last_correct_time < cooldown:
                 return
-            
+            # 答题判断
             if user_input == answer:
-                feedback_elem.innerText = "CORRECT! ⭐"
-                feedback_elem.style.color = "green"
+                feedback_elem.innerText = "CORRECT! ✅"
+                feedback_elem.style.color = "#28a745"
                 correct_num += 1
                 last_correct_time = current_time
                 # 星星奖励
                 if correct_num % star_threshold == 0:
                     star_count += 1
-                    feedback_elem.innerText = f"CORRECT! Stars: {star_count}"
+                    feedback_elem.innerText = f"CORRECT! ⭐ Stars: {star_count}"
+                # 生成新题
+                question, answer = generate_question(current_difficulty)
+                question_elem.innerText = question
             else:
                 feedback_elem.innerText = f"WRONG! Answer is {answer}"
-                feedback_elem.style.color = "red"
+                feedback_elem.style.color = "#dc3545"
                 wrong_num += 1
             # 更新统计
             stats_elem.innerText = f"Correct: {correct_num} | Wrong: {wrong_num} | Stars: {star_count}"
-            # 生成新题目
-            global question, answer
-            question, answer = generate_question(current_difficulty)
-            feedback_elem.innerText += f" | Next: {question}"
 
-        # ===================== 难度切换 =====================
-        def set_difficulty10(event):
+        # ===================== 5. 难度切换（修复按钮事件） =====================
+        def set_difficulty(diff):
             global current_difficulty, question, answer
-            current_difficulty = 10
-            question, answer = generate_question(10)
-            feedback_elem.innerText = f"Difficulty: 10 | Next: {question}"
+            current_difficulty = diff
+            question, answer = generate_question(diff)
+            question_elem.innerText = question
+            feedback_elem.innerText = f"Difficulty set to {diff}!"
+            feedback_elem.style.color = "#6a0dad"
 
-        def set_difficulty20(event):
-            global current_difficulty, question, answer
-            current_difficulty = 20
-            question, answer = generate_question(20)
-            feedback_elem.innerText = f"Difficulty: 20 | Next: {question}"
-
-        def set_difficulty100(event):
-            global current_difficulty, question, answer
-            current_difficulty = 100
-            question, answer = generate_question(100)
-            feedback_elem.innerText = f"Difficulty: 100 | Next: {question}"
-
-        # ===================== 摄像头实时处理 =====================
-        def process_video():
-            # 获取摄像头帧
-            cap = cv2.VideoCapture(0)
+        # ===================== 6. 视频实时处理（修复渲染逻辑） =====================
+        def process_frame():
+            if not opencv_loaded or cap is None:
+                # 循环调用自身
+                setTimeout(create_proxy(process_frame), 30)
+                return
+            # 读取摄像头帧
             ret, frame = cap.read()
             if not ret:
+                setTimeout(create_proxy(process_frame), 30)
                 return
-            
-            # 镜像翻转 + 手势计数
+            # 镜像翻转（符合人眼视角）
             frame = cv2.flip(frame, 1)
+            # 手势计数
             finger_count = count_fingers(frame)
-            
-            # 显示手指计数（叠加到画面）
-            cv2.putText(frame, f"Fingers: {finger_count}", (20, 50), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(frame, question, (20, 100), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
-            
-            # 转换为浏览器可显示的格式
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_frame.shape
-            bytes_per_line = ch * w
-            # 更新video元素
-            img_data = ImageData(Uint8ClampedArray(rgb_frame.tobytes()), w, h)
-            video.getContext('2d').putImageData(img_data, 0, 0)
-            
-            # 答题判断（稳定计数后提交）
+            # 更新界面显示
+            finger_count_elem.innerText = f"Fingers: {finger_count}"
+            # 稳定计数后答题（避免手抖误判：计数>0时提交）
             if finger_count > 0:
                 check_answer(finger_count)
-            
-            # 循环调用
-            setTimeout(create_proxy(process_video), 30)
+            # 循环调用，保持实时更新
+            setTimeout(create_proxy(process_frame), 30)
 
-        # ===================== 初始化 =====================
-        def init():
-            # 绑定难度按钮事件
-            document.getElementById("btn10").addEventListener("click", create_proxy(set_difficulty10))
-            document.getElementById("btn20").addEventListener("click", create_proxy(set_difficulty20))
-            document.getElementById("btn100").addEventListener("click", create_proxy(set_difficulty100))
-            # 初始化题目
-            global question, answer
+        # ===================== 7. 游戏初始化（修复摄像头调用） =====================
+        def init_game():
+            global question, answer, cap
+            # 1. 生成初始题目
             question, answer = generate_question(current_difficulty)
-            feedback_elem.innerText = f"Ready! First question: {question}"
-            # 启动摄像头
-            navigator.mediaDevices.getUserMedia({"video": True}).then(lambda stream: video.srcObject = stream)
-            # 启动视频处理
-            process_video()
+            question_elem.innerText = question
+            # 2. 绑定难度按钮事件（修复create_proxy调用）
+            document.getElementById("btn10").addEventListener("click", create_proxy(lambda e: set_difficulty(10)))
+            document.getElementById("btn20").addEventListener("click", create_proxy(lambda e: set_difficulty(20)))
+            document.getElementById("btn100").addEventListener("click", create_proxy(lambda e: set_difficulty(100)))
+            # 3. 调用浏览器摄像头（原生JS方式，兼容PyScript）
+            def success(stream):
+                global cap
+                video_elem.srcObject = stream
+                # 初始化OpenCV摄像头（基于浏览器流）
+                cap = cv2.VideoCapture(0)
+                # 启动帧处理循环
+                process_frame()
+            def error(err):
+                feedback_elem.innerText = f"Camera error: {err.message}"
+                feedback_elem.style.color = "#dc3545"
+            # 申请摄像头权限
+            navigator.mediaDevices.getUserMedia({"video": True}).then(success).catch(error)
 
-        # 页面加载后初始化
-        init()
+        # 页面加载后等待OpenCV初始化
+        document.addEventListener("DOMContentLoaded", lambda: console.log("Page loaded, waiting for OpenCV..."))
     </py-script>
 </body>
 </html>
